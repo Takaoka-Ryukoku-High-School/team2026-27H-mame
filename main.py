@@ -251,40 +251,6 @@ HIGH_SCHOOL_CURRICULUM = {
     },
 }
 
-QUIZ = [
-    {
-        "question": "間違えた問題を復習するとき、いちばん効果的なのは？",
-        "options": [
-            "答えを写して、すぐ次の問題へ進む",
-            "間違えた理由を見つけて、時間をあけて解き直す",
-            "同じページを何度も読む",
-        ],
-        "answer": 1,
-        "explanation": "理由を知ってから解き直すと、次に同じミスを防ぎやすくなります。",
-    },
-    {
-        "question": "テスト中、時間がかかりそうな問題に出会ったら？",
-        "options": [
-            "時間をかけてその場で解き切る",
-            "空欄のままにして見直しもしない",
-            "印をつけて先へ進み、あとで戻る",
-        ],
-        "answer": 2,
-        "explanation": "解ける問題を先に取り、残り時間で戻ると得点の取りこぼしを減らせます。",
-    },
-    {
-        "question": "覚えた内容が身についているか確かめるには？",
-        "options": [
-            "本を閉じて、覚えたことを自分で書き出す",
-            "教科書を開いたまま何度も眺める",
-            "ノートをきれいに書き直す",
-        ],
-        "answer": 0,
-        "explanation": "何も見ずに思い出す練習で、覚えていることと復習が必要なことがわかります。",
-    },
-]
-
-
 def extract_question_text(image_bytes):
     with Image.open(io.BytesIO(image_bytes)) as image:
         if image.width * image.height > MAX_IMAGE_PIXELS:
@@ -457,10 +423,8 @@ def main(page: ft.Page):
     selected_grade = "1"
     selected_subject = "数学"
     selected_range_key = "__all__"
+    selection_step = 0
     range_topic_options = {}
-    quiz_index = 0
-    quiz_score = 0
-    quiz_answered = False
 
     notice = ft.Text(
         storage_message,
@@ -480,7 +444,6 @@ def main(page: ft.Page):
     )
     lesson_buttons = ft.Column(spacing=8)
     lesson_detail = ft.Column(spacing=14)
-    quiz_content = ft.Column(spacing=14)
     photo_status = ft.Text(
         "写真はこのアプリ内で読み取り、保存・送信しません。",
         size=12,
@@ -606,6 +569,7 @@ def main(page: ft.Page):
     predicted_test_score = 0
     predicted_test_answered = False
     predicted_test_answer_revealed = False
+    predicted_test_answer_seen = False
     predicted_test_title = "テスト"
     predicted_test_answer_input = ft.TextField(
         label="あなたの解答",
@@ -966,23 +930,33 @@ def main(page: ft.Page):
 
     def begin_test(questions, title):
         nonlocal predicted_test_questions, predicted_test_index
-        nonlocal predicted_test_score, predicted_test_answered, predicted_test_answer_revealed
+        nonlocal predicted_test_score, predicted_test_answered
+        nonlocal predicted_test_answer_revealed, predicted_test_answer_seen
         nonlocal predicted_test_title
         predicted_test_questions = [item.copy() for item in questions]
         predicted_test_index = 0
         predicted_test_score = 0
         predicted_test_answered = False
         predicted_test_answer_revealed = False
+        predicted_test_answer_seen = False
         predicted_test_title = title
         predicted_test_answer_input.value = ""
         predicted_test_feedback.value = ""
         render_predicted_test()
 
     def reveal_predicted_test_answer(event):
-        nonlocal predicted_test_answer_revealed
+        nonlocal predicted_test_answer_revealed, predicted_test_answer_seen
         if predicted_test_answered or not predicted_test_questions:
             return
         predicted_test_answer_revealed = True
+        predicted_test_answer_seen = True
+        render_predicted_test()
+
+    def retry_predicted_test_question(event):
+        nonlocal predicted_test_answer_revealed
+        predicted_test_answer_revealed = False
+        predicted_test_answer_input.value = ""
+        predicted_test_feedback.value = ""
         render_predicted_test()
 
     def answer_predicted_test(event):
@@ -998,7 +972,15 @@ def main(page: ft.Page):
 
         problem = predicted_test_questions[predicted_test_index]
         predicted_test_answered = True
-        if normalize_answer(user_answer) == normalize_answer(problem["answer"]):
+        is_correct = normalize_answer(user_answer) == normalize_answer(problem["answer"])
+        if predicted_test_answer_seen:
+            predicted_test_feedback.value = (
+                "正解ですが、答えを見た問題は採点対象外です。"
+                if is_correct
+                else f"不正解です。模範解答：{problem['answer']}（採点対象外）"
+            )
+            predicted_test_feedback.color = GREEN if is_correct else CORAL
+        elif is_correct:
             predicted_test_score += 1
             predicted_test_feedback.value = "正解！ 5ポイント獲得。"
             predicted_test_feedback.color = GREEN
@@ -1011,10 +993,12 @@ def main(page: ft.Page):
         render_predicted_test()
 
     def advance_predicted_test(event):
-        nonlocal predicted_test_index, predicted_test_answered, predicted_test_answer_revealed
+        nonlocal predicted_test_index, predicted_test_answered
+        nonlocal predicted_test_answer_revealed, predicted_test_answer_seen
         predicted_test_index += 1
         predicted_test_answered = False
         predicted_test_answer_revealed = False
+        predicted_test_answer_seen = False
         predicted_test_answer_input.value = ""
         predicted_test_feedback.value = ""
         render_predicted_test()
@@ -1101,10 +1085,9 @@ def main(page: ft.Page):
                         bgcolor=GREEN_LIGHT,
                         border_radius=6,
                     ),
-                    ft.Text("答えを確認したため、この問題は採点されません。", size=11, color=MUTED),
                     ft.Button(
-                        "次の問題" if predicted_test_index < len(predicted_test_questions) - 1 else "結果を見る",
-                        on_click=advance_predicted_test,
+                        "同じ問題をもう一度解く",
+                        on_click=retry_predicted_test_question,
                         bgcolor=GREEN,
                         color="white",
                         style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=6)),
@@ -1211,8 +1194,9 @@ def main(page: ft.Page):
                 )
         page.update()
 
-    def select_subject(subject):
+    def select_subject(subject, advance_to_range=True):
         nonlocal selected_subject, selected_range_key, predicted_test_questions
+        nonlocal selection_step
         selected_subject = subject or "すべて"
         selected_range_key = "__all__"
         range_selector.value = selected_range_key
@@ -1232,9 +1216,12 @@ def main(page: ft.Page):
         render_predictions()
         if learned_pattern_panel.controls:
             learn_past_questions(None)
+        if advance_to_range:
+            selection_step = 2
+        render_selection_step()
 
     def select_grade(grade):
-        nonlocal selected_grade, selected_subject
+        nonlocal selected_grade, selected_subject, selection_step
         selected_grade = grade if grade in HIGH_SCHOOL_CURRICULUM else "1"
         grade_selector.value = selected_grade
         subjects = HIGH_SCHOOL_CURRICULUM[selected_grade]
@@ -1249,7 +1236,15 @@ def main(page: ft.Page):
         if selected_subject not in subjects and selected_subject not in ("すべて", "その他"):
             selected_subject = next(iter(subjects))
         subject_selector.value = selected_subject
-        select_subject(selected_subject)
+        select_subject(selected_subject, advance_to_range=False)
+        selection_step = 1
+        render_selection_step()
+
+    def go_to_previous_selection(event):
+        nonlocal selection_step
+        if selection_step > 0:
+            selection_step -= 1
+            render_selection_step()
 
     def record_weak_problem(problem):
         key = normalize_answer(problem["question"])
@@ -1575,97 +1570,22 @@ def main(page: ft.Page):
         )
         page.update()
 
-    def answer_quiz(choice_index):
-        nonlocal quiz_answered, quiz_score
-        if quiz_answered:
-            return
-        question = QUIZ[quiz_index]
-        is_correct = choice_index == question["answer"]
-        quiz_answered = True
-        if is_correct:
-            quiz_score += 1
-            add_points(5, "クイズ正解 +5 pt")
-            persist_progress()
-        render_quiz(
-            "正解！ " + question["explanation"]
-            if is_correct
-            else "おしい！ " + question["explanation"],
-            is_correct,
-        )
-
-    def next_question(event):
-        nonlocal quiz_index, quiz_answered, quiz_score
-        if quiz_index == len(QUIZ) - 1:
-            quiz_index = 0
-            quiz_answered = False
-            quiz_score = 0
-        else:
-            quiz_index += 1
-            quiz_answered = False
-        render_quiz()
-
-    def render_quiz(feedback="", is_correct=False):
-        question = QUIZ[quiz_index]
-        quiz_content.controls = [
-            ft.Row(
+    def selection_card(title, control, description, visible=True):
+        return ft.Container(
+            content=ft.Column(
                 [
-                    ft.Text(f"QUESTION {quiz_index + 1} / {len(QUIZ)}", size=11, color=GREEN, weight=ft.FontWeight.BOLD),
-                    ft.Text(f"正解 {quiz_score} 問", size=11, color=MUTED),
+                    ft.Text(title, size=15, color=INK, weight=ft.FontWeight.W_600),
+                    control,
+                    ft.Text(description, size=11, color=MUTED),
                 ],
-                alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                spacing=8,
             ),
-            ft.Text(question["question"], size=17, color=INK, weight=ft.FontWeight.W_600),
-        ]
-        for index, option in enumerate(question["options"]):
-            quiz_content.controls.append(
-                ft.Button(
-                    content=ft.Row(
-                        [
-                            ft.Text(chr(65 + index), size=12, color=GREEN, weight=ft.FontWeight.BOLD),
-                            ft.Text(option, size=13, color=INK, expand=True, text_align=ft.TextAlign.LEFT),
-                        ],
-                        spacing=12,
-                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                    ),
-                    on_click=lambda event, choice=index: answer_quiz(choice),
-                    disabled=quiz_answered,
-                    bgcolor=WHITE,
-                    color=INK,
-                    style=ft.ButtonStyle(
-                        shape=ft.RoundedRectangleBorder(radius=6),
-                        side=ft.BorderSide(1, "#E3E3D9"),
-                        padding=14,
-                    ),
-                    width=float("inf"),
-                )
-            )
-        if feedback:
-            quiz_content.controls.append(
-                ft.Container(
-                    content=ft.Text(feedback, size=12, color=GREEN if is_correct else CORAL),
-                    padding=12,
-                    bgcolor=GREEN_LIGHT if is_correct else "#F9E9E4",
-                    border_radius=6,
-                )
-            )
-        if feedback:
-            quiz_content.controls.append(
-                ft.Button(
-                    "もう一度挑戦" if quiz_index == len(QUIZ) - 1 else "次の問題へ",
-                    on_click=next_question,
-                    bgcolor=GREEN,
-                    color="white",
-                    style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=6)),
-                )
-            )
-            if quiz_index == len(QUIZ) - 1:
-                quiz_content.controls.append(
-                    ft.Text(
-                        f"今回の結果：{quiz_score} / {len(QUIZ)} 問正解",
-                        size=12,
-                        color=MUTED,
-                    )
-                )
+            padding=16,
+            bgcolor=WHITE,
+            border=ft.Border.all(1, "#E3E3D9"),
+            border_radius=8,
+            visible=visible,
+        )
 
     today = ft.Text(
         date.today().strftime("%Y年%m月%d日"),
@@ -1705,6 +1625,65 @@ def main(page: ft.Page):
         ],
         spacing=14,
     )
+    grade_selection_card = selection_card(
+        "学年を選ぶ",
+        grade_selector,
+        "高校1〜3年から選択します。",
+    )
+    subject_selection_card = selection_card(
+        "教科を選ぶ",
+        subject_selector,
+        "選んだ学年に応じた教科が表示されます。",
+        visible=False,
+    )
+    range_selection_card = selection_card(
+        "範囲を選ぶ",
+        ft.Column(
+            [
+                ft.Row(
+                    [range_selector, start_range_test_button],
+                    wrap=True,
+                    spacing=10,
+                    run_spacing=8,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                ),
+                ft.Text(
+                    "選んだ学年・教科・範囲は、過去問の分析と問題登録にも反映されます。",
+                    size=11,
+                    color=MUTED,
+                ),
+                predicted_test_panel,
+            ],
+            spacing=8,
+        ),
+        "登録済みの範囲を選ぶと、その問題が出題されます。",
+        visible=False,
+    )
+    selection_step_indicator = ft.Text(size=12, color=GREEN, weight=ft.FontWeight.BOLD)
+    previous_selection_button = ft.TextButton(
+        "前の選択へ戻る",
+        on_click=go_to_previous_selection,
+        visible=False,
+    )
+    selection_flow = ft.Column(
+        [
+            selection_step_indicator,
+            previous_selection_button,
+            grade_selection_card,
+            subject_selection_card,
+            range_selection_card,
+        ],
+        spacing=10,
+    )
+
+    def render_selection_step():
+        selection_step_indicator.value = f"選択 {selection_step + 1} / 3"
+        previous_selection_button.visible = selection_step > 0
+        grade_selection_card.visible = selection_step == 0
+        subject_selection_card.visible = selection_step == 1
+        range_selection_card.visible = selection_step == 2
+        page.update()
+
     content = ft.Column(
         [
             header,
@@ -1736,41 +1715,8 @@ def main(page: ft.Page):
                 border_radius=8,
             ),
             notice,
-            ft.Container(
-                content=ft.Column(
-                    [
-                        ft.Row(
-                            [grade_selector, subject_selector],
-                            wrap=True,
-                            spacing=10,
-                            run_spacing=8,
-                        ),
-                        ft.Text(
-                            "高校の学年に合わせた教科・範囲から選び、登録済みの問題を出題します。",
-                            size=12,
-                            color=MUTED,
-                        ),
-                        ft.Row(
-                            [range_selector, start_range_test_button],
-                            wrap=True,
-                            spacing=10,
-                            run_spacing=8,
-                            vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                        ),
-                        ft.Text(
-                            "選んだ学年・教科・範囲は、過去問の分析と問題登録にも反映されます。",
-                            size=11,
-                            color=MUTED,
-                        ),
-                        predicted_test_panel,
-                    ],
-                    spacing=8,
-                ),
-                padding=16,
-                bgcolor=WHITE,
-                border=ft.Border.all(1, "#E3E3D9"),
-                border_radius=8,
-            ),
+            ft.Text("勉強する内容を選ぶ", size=20, color=INK, weight=ft.FontWeight.W_600),
+            selection_flow,
             ft.Text("攻略レッスン", size=20, color=INK, weight=ft.FontWeight.W_600),
             lesson_layout,
             ft.Text("過去問を写真から出題", size=20, color=INK, weight=ft.FontWeight.W_600),
@@ -1846,20 +1792,6 @@ def main(page: ft.Page):
                 border=ft.Border.all(1, "#E3E3D9"),
                 border_radius=8,
             ),
-            ft.Row(
-                [
-                    ft.Text("実践クイズ", size=20, color=INK, weight=ft.FontWeight.W_600),
-                    ft.Text("学んだコツを試そう", size=12, color=MUTED),
-                ],
-                spacing=10,
-            ),
-            ft.Container(
-                content=quiz_content,
-                padding=20,
-                bgcolor=WHITE,
-                border=ft.Border.all(1, "#E3E3D9"),
-                border_radius=8,
-            ),
             ft.Text("小さな工夫を、次の自信に。", size=12, color=MUTED, text_align=ft.TextAlign.CENTER),
         ],
         width=760,
@@ -1881,9 +1813,9 @@ def main(page: ft.Page):
     render_progress()
     render_lessons()
     refresh_range_selector()
+    render_selection_step()
     render_predictions()
     render_weak_problems()
-    render_quiz()
 
 
 if __name__ == "__main__":
