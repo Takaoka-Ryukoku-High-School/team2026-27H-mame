@@ -25,6 +25,10 @@ CORAL = "#CF6048"
 WHITE = "#FFFEFA"
 MAX_PHOTO_BYTES = 12 * 1024 * 1024
 MAX_IMAGE_PIXELS = 30_000_000
+WEAK_PROBLEM_POINT_THRESHOLD = 10
+WEAK_PROBLEM_POINT_REWARD = 0
+QUESTION_POINT_REWARD = 1
+FIRST_TRY_QUESTION_POINT_REWARD = 10
 
 LESSONS = [
     {
@@ -68,20 +72,6 @@ LESSONS = [
             "少し時間をあけて、もう一度解く",
         ],
         "tip": "同じ問題を解き直せたら、攻略できたサイン。",
-    },
-    {
-        "id": "exam-day",
-        "eyebrow": "04  TEST DAY",
-        "title": "本番で時間を味方にする",
-        "summary": "解ける問題から進めて、最後に見直す時間を作ろう。",
-        "detail": "最初に問題全体を見て、時間配分をざっくり決めます。"
-        "迷った問題に印をつけて先へ進めば、解ける問題を取りこぼしにくくなります。",
-        "steps": [
-            "開始したら問題全体と配点を確認する",
-            "解ける問題から答えていく",
-            "残り時間で印をつけた問題を見直す",
-        ],
-        "tip": "見直しでは、名前・単位・問題の条件もチェック。",
     },
 ]
 
@@ -264,6 +254,24 @@ def normalize_answer(text):
     return "".join(unicodedata.normalize("NFKC", text).split()).casefold()
 
 
+def problem_point_reward(weak_problems, problem, is_correct):
+    question_key = normalize_answer(problem["question"])
+    previous_mistakes = next(
+        (
+            item["mistakes"]
+            for item in weak_problems
+            if normalize_answer(item["question"]) == question_key
+        ),
+        0,
+    )
+    mistakes_after_answer = previous_mistakes + (0 if is_correct else 1)
+    if mistakes_after_answer >= WEAK_PROBLEM_POINT_THRESHOLD:
+        return WEAK_PROBLEM_POINT_REWARD
+    if is_correct and previous_mistakes == 0:
+        return FIRST_TRY_QUESTION_POINT_REWARD
+    return QUESTION_POINT_REWARD
+
+
 def topic_matches_subject(topic, subject):
     topic_key = normalize_answer(topic)
     subject_key = normalize_answer(subject)
@@ -423,6 +431,7 @@ def main(page: ft.Page):
     selected_grade = "1"
     selected_subject = "数学"
     selected_range_key = "__all__"
+    selected_predicted_topic_key = None
     selection_step = 0
     range_topic_options = {}
 
@@ -504,6 +513,16 @@ def main(page: ft.Page):
         bgcolor=WHITE,
         on_select=lambda event: select_range(event.control.value),
     )
+    predicted_topic_selector = ft.Dropdown(
+        label="予想テストの範囲",
+        value=selected_predicted_topic_key,
+        options=[],
+        width=320,
+        border_color="#D4DED5",
+        focused_border_color=GREEN,
+        bgcolor=WHITE,
+        on_select=lambda event: select_predicted_topic(event.control.value),
+    )
     question_text_input = ft.TextField(
         label="読み取った問題文（必要なら修正）",
         multiline=True,
@@ -553,6 +572,7 @@ def main(page: ft.Page):
     )
     weak_problem_list = ft.Column(spacing=10)
     prediction_list = ft.Column(spacing=10)
+    predicted_test_status = ft.Text(size=11, color=MUTED)
     learned_pattern_panel = ft.Column(spacing=8)
     predicted_test_panel = ft.Column(spacing=12)
     prediction_status = ft.Text(
@@ -743,15 +763,32 @@ def main(page: ft.Page):
             return
         answer_revealed = True
         answer_checked = True
-        if normalize_answer(user_answer) == normalize_answer(active_problem["answer"]):
-            photo_answer_feedback.value = "正解です！"
-            photo_answer_feedback.color = GREEN
-            if not photo_points_awarded:
-                photo_points_awarded = True
-                add_points(5, "写真問題正解 +5 pt")
+        is_correct = normalize_answer(user_answer) == normalize_answer(active_problem["answer"])
+        if not photo_points_awarded:
+            photo_points_awarded = True
+            points_earned = problem_point_reward(weak_problems, active_problem, is_correct)
+            if points_earned:
+                add_points(points_earned, f"問題に挑戦 +{points_earned} pt")
                 persist_progress()
+            else:
+                points_message = "間違いが10回以上のためポイント対象外です。"
         else:
-            photo_answer_feedback.value = "不正解です。模範解答を確認してみましょう。"
+            points_earned = 0
+            points_message = "この問題のポイントは獲得済みです。"
+        if is_correct:
+            photo_answer_feedback.value = (
+                f"正解です！ {points_earned}ポイント獲得。"
+                if points_earned
+                else f"正解です！ {points_message}"
+            )
+            photo_answer_feedback.color = GREEN
+        else:
+            feedback = (
+                f"挑戦ポイント{points_earned}ポイント獲得。"
+                if points_earned
+                else points_message
+            )
+            photo_answer_feedback.value = f"不正解です。{feedback}模範解答を確認してみましょう。"
             photo_answer_feedback.color = CORAL
             record_weak_problem(active_problem)
         photo_answer_feedback.visible = True
@@ -902,6 +939,18 @@ def main(page: ft.Page):
         ]
         begin_test(questions, "予想テスト")
 
+    def select_predicted_topic(topic_key):
+        nonlocal selected_predicted_topic_key
+        selected_predicted_topic_key = topic_key
+
+    def start_selected_predicted_test(event):
+        if selected_predicted_topic_key is None:
+            predicted_test_status.value = "予想テストの範囲がありません。過去問を同じ教科・単元で2問以上登録してください。"
+            predicted_test_status.color = MUTED
+            page.update()
+            return
+        start_predicted_test(selected_predicted_topic_key)
+
     def start_range_test(event):
         questions = questions_for_selected_subject()
         if selected_range_key != "__all__":
@@ -975,21 +1024,37 @@ def main(page: ft.Page):
         is_correct = normalize_answer(user_answer) == normalize_answer(problem["answer"])
         if predicted_test_answer_seen:
             predicted_test_feedback.value = (
-                "正解ですが、答えを見た問題は採点対象外です。"
+                "正解ですが、答えを見た問題は採点・ポイントの対象外です。"
                 if is_correct
-                else f"不正解です。模範解答：{problem['answer']}（採点対象外）"
+                else f"不正解です。模範解答：{problem['answer']}（採点・ポイント対象外）"
             )
             predicted_test_feedback.color = GREEN if is_correct else CORAL
-        elif is_correct:
-            predicted_test_score += 1
-            predicted_test_feedback.value = "正解！ 5ポイント獲得。"
-            predicted_test_feedback.color = GREEN
-            add_points(5, "予想テスト正解 +5 pt")
-            persist_progress()
         else:
-            predicted_test_feedback.value = f"不正解。模範解答：{problem['answer']}"
-            predicted_test_feedback.color = CORAL
-            record_weak_problem(problem)
+            points_earned = problem_point_reward(weak_problems, problem, is_correct)
+            if points_earned:
+                add_points(points_earned, f"問題に挑戦 +{points_earned} pt")
+                persist_progress()
+            if is_correct:
+                predicted_test_score += 1
+                predicted_test_feedback.value = (
+                    f"正解！ {points_earned}ポイント獲得。"
+                    if points_earned
+                    else "正解ですが、間違いが10回以上のためポイント対象外です。"
+                )
+                predicted_test_feedback.color = GREEN
+            else:
+                if points_earned:
+                    predicted_test_feedback.value = (
+                        f"不正解ですが、挑戦ポイント{points_earned}ポイント獲得。"
+                        f"模範解答：{problem['answer']}"
+                    )
+                else:
+                    predicted_test_feedback.value = (
+                        "不正解です。間違いが10回以上のためポイント対象外です。"
+                        f"模範解答：{problem['answer']}"
+                    )
+                predicted_test_feedback.color = CORAL
+                record_weak_problem(problem)
         render_predicted_test()
 
     def advance_predicted_test(event):
@@ -1116,6 +1181,7 @@ def main(page: ft.Page):
         page.update()
 
     def render_predictions():
+        nonlocal selected_predicted_topic_key
         analysis = analyze_past_questions(questions_for_selected_subject())
         topic_labels = {
             normalize_answer(topic): topic
@@ -1126,6 +1192,23 @@ def main(page: ft.Page):
             for topic, count in analysis["topic_counts"]
             if count >= 2
         ][:3]
+        predicted_topic_selector.options = [
+            ft.DropdownOption(key=topic_key, text=topic)
+            for topic, _, topic_key in recurring_topics
+        ]
+        available_topic_keys = {topic_key for _, _, topic_key in recurring_topics}
+        if selected_predicted_topic_key not in available_topic_keys:
+            selected_predicted_topic_key = (
+                recurring_topics[0][2] if recurring_topics else None
+            )
+        predicted_topic_selector.value = selected_predicted_topic_key
+        predicted_topic_selector.disabled = not recurring_topics
+        predicted_test_status.value = (
+            "同じ教科・単元の過去問が複数ある範囲から選べます。"
+            if recurring_topics
+            else "予想テストには、同じ教科・単元の過去問を2問以上登録してください。"
+        )
+        predicted_test_status.color = MUTED
         prediction_list.controls = []
         if analysis["question_count"] < 2:
             subject_label = "この教科の過去問" if selected_subject != "すべて" else "過去問"
@@ -1428,6 +1511,13 @@ def main(page: ft.Page):
         color="white",
         style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=6)),
     )
+    start_selected_predicted_test_button = ft.Button(
+        "予想テストに挑戦",
+        on_click=start_selected_predicted_test,
+        bgcolor=GREEN_LIGHT,
+        color=GREEN,
+        style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=6)),
+    )
     make_photo_problem_button = ft.Button(
         "この問題を出す",
         on_click=show_problem,
@@ -1483,7 +1573,7 @@ def main(page: ft.Page):
             completed_lessons.add(lesson_id)
             if lesson_id not in awarded_lessons:
                 awarded_lessons.add(lesson_id)
-                add_points(10, "レッスン完了 +10 pt")
+                add_points(5, "レッスン完了 +5 pt")
         persist_progress()
         render_progress()
         render_lessons()
@@ -1652,6 +1742,9 @@ def main(page: ft.Page):
                     size=11,
                     color=MUTED,
                 ),
+                predicted_topic_selector,
+                start_selected_predicted_test_button,
+                predicted_test_status,
                 predicted_test_panel,
             ],
             spacing=8,
@@ -1705,6 +1798,11 @@ def main(page: ft.Page):
                             alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
                         ),
                         points_feedback,
+                        ft.Text(
+                            "ポイントは無料です。初回正解は10ポイント、その他は通常1ポイント。同じ問題を10回以上間違えたらポイント対象外です。",
+                            size=11,
+                            color=MUTED,
+                        ),
                         progress_bar,
                     ],
                     spacing=10,
